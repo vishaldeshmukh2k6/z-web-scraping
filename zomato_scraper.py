@@ -29,87 +29,152 @@ def get_driver():
 
 
 def get_links_after_one_scroll(driver):
+    # Scroll through the page slowly to trigger lazy loading of images
+    try:
+        total_height = driver.execute_script("return document.body.scrollHeight")
+        for pos in range(0, total_height, 500):
+            driver.execute_script(f"window.scrollTo(0, {pos});")
+            time.sleep(0.3)
+        # Scroll back to bottom
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
+    except:
+        pass
+
     cards = driver.find_elements(By.CSS_SELECTOR, "div[class*='jumbo-tracker']")
     results = {}  # { url: card_image_url }
     for card in cards:
-        a_tags = card.find_elements(By.TAG_NAME, "a")
-        if len(a_tags) >= 2:
-            href = a_tags[1].get_attribute("href") or ""
-            if "/info" in href:
-                url = href.replace("/info", "")
-                # Grab the card thumbnail image (first img inside the card)
-                card_img = "N/A"
-                try:
-                    img_el = card.find_element(By.TAG_NAME, "img")
-                    src = img_el.get_attribute("src") or img_el.get_attribute("data-src") or ""
-                    if src:
-                        card_img = src
-                except:
-                    pass
-                results[url] = card_img
+        try:
+            a_tags = card.find_elements(By.TAG_NAME, "a")
+            if len(a_tags) >= 2:
+                href = a_tags[1].get_attribute("href") or ""
+                if "/info" in href:
+                    url = href.replace("/info", "")
+                    # Grab the restaurant thumbnail — the large hero image on the card
+                    card_img = "N/A"
+                    try:
+                        img_els = card.find_elements(By.TAG_NAME, "img")
+                        for img_el in img_els:
+                            src = (img_el.get_attribute("src")
+                                   or img_el.get_attribute("data-src")
+                                   or img_el.get_attribute("srcset")
+                                   or "")
+                            if not src:
+                                continue
+                            # Skip promo badges, logos, icons, assets
+                            if "o2_assets" in src or "logo" in src or "icon" in src or "web_assets" in src:
+                                continue
+                            # The restaurant thumbnail is from /data/pictures
+                            if "zmtcdn.com/data/pictures" in src or "zmtcdn.com/data/reviews_photos" in src:
+                                card_img = src.split(",")[0].strip()  # handle srcset format
+                                break
+                        # Fallback: any zmtcdn image that's not an asset
+                        if card_img == "N/A":
+                            for img_el in img_els:
+                                src = (img_el.get_attribute("src")
+                                       or img_el.get_attribute("data-src")
+                                       or "")
+                                if not src:
+                                    continue
+                                if "o2_assets" in src or "logo" in src or "icon" in src or "web_assets" in src:
+                                    continue
+                                if "zmtcdn.com" in src:
+                                    card_img = src
+                                    break
+                    except:
+                        pass
+                    results[url] = card_img
+        except:
+            continue
     return results  # returns dict {url: card_image}
 
 
 def scrape_menu_images(driver, url):
     """On the /info page, scroll to menu section, click each menu card
     to open popup, navigate pages with arrow, collect images."""
+    from selenium.webdriver.common.keys import Keys
+
     menu_images = {}  # { "Food Menu": [img1, img2, ...], "Bar Menu": [...] }
 
     try:
-        # Make sure we're on the info page
-        info_url = url.rstrip("/") + "/info"
-        if "/info" not in driver.current_url:
-            driver.get(info_url)
-            time.sleep(4)
-
         # Scroll down to make menu section visible
-        driver.execute_script("window.scrollTo(0, 600);")
+        driver.execute_script("window.scrollTo(0, 800);")
         time.sleep(2)
 
-        # Find elements with "page" or "pages" text — these sit under the menu cards
-        page_indicators = driver.find_elements(
-            By.XPATH,
-            "//*[contains(text(),' page')]"
-        )
-
-        menu_cards_info = []  # [(menu_name, clickable_element)]
-        for indicator in page_indicators:
-            try:
-                text = indicator.text.strip().lower()
-                if "page" not in text:
-                    continue
-                # The clickable card is typically a parent/grandparent of the "X pages" text
-                parent = indicator.find_element(By.XPATH, "./..")
-                grandparent = parent.find_element(By.XPATH, "./..")
-                container_text = grandparent.text.strip()
-                lines = [l.strip() for l in container_text.split("\n") if l.strip()]
-                # Menu name is the line containing "Menu" but not "page"
-                menu_name = "Menu"
-                for line in lines:
-                    if "menu" in line.lower() and "page" not in line.lower():
-                        menu_name = line
-                        break
-                menu_cards_info.append((menu_name, grandparent))
-            except:
-                continue
-
-        if not menu_cards_info:
-            # Fallback: find menu thumbnail images and use their parent as clickable
-            menu_section_imgs = driver.find_elements(
+        # First pass: count how many menu cards exist
+        def find_menu_cards():
+            """Re-find all clickable menu cards on the page."""
+            page_indicators = driver.find_elements(
                 By.XPATH,
-                "//img[contains(@src,'zmtcdn.com') and contains(@src,'menu')]"
+                "//p[contains(text(),'page')]"
             )
-            for idx, img in enumerate(menu_section_imgs):
+            cards = []
+            for indicator in page_indicators:
                 try:
-                    parent = img.find_element(By.XPATH, "./..")
-                    menu_cards_info.append((f"Menu {idx + 1}", parent))
+                    text = indicator.text.strip().lower()
+                    if "page" not in text:
+                        continue
+                    # The direct parent div (with cursor:pointer) is the clickable card
+                    parent = indicator.find_element(By.XPATH, "./..")
+                    cursor = parent.value_of_css_property("cursor")
+                    if cursor == "pointer":
+                        clickable = parent
+                    else:
+                        clickable = parent
+                        for _ in range(3):
+                            clickable = clickable.find_element(By.XPATH, "./..")
+                            if clickable.value_of_css_property("cursor") == "pointer":
+                                break
+
+                    # Get menu name from sibling h4 heading
+                    container = clickable.find_element(By.XPATH, "./..")
+                    h4_els = container.find_elements(By.TAG_NAME, "h4")
+                    if h4_els:
+                        menu_name = h4_els[0].text.strip()
+                    else:
+                        card_text = clickable.text.strip()
+                        lines = [l.strip() for l in card_text.split("\n") if l.strip()]
+                        menu_name = "Menu"
+                        for line in lines:
+                            if "menu" in line.lower() and "page" not in line.lower():
+                                menu_name = line
+                                break
+
+                    # Skip promo/offer cards (not actual menus)
+                    promo_keywords = ["off", "flat", "discount", "offer", "deal", "free", "cashback", "save"]
+                    if any(kw in menu_name.lower() for kw in promo_keywords):
+                        continue
+
+                    cards.append((menu_name, clickable))
                 except:
-                    pass
+                    continue
+            return cards
 
-        print(f"      📋 Found {len(menu_cards_info)} menu(s) to scrape")
+        # Get initial count of menu cards
+        initial_cards = find_menu_cards()
+        total_menus = len(initial_cards)
+        menu_names = [name for name, _ in initial_cards]
 
-        for menu_name, card_element in menu_cards_info:
+        if total_menus == 0:
+            # Fallback: find menu thumbnail images with /data/menus/ in src
+            menu_thumbs = driver.find_elements(
+                By.CSS_SELECTOR,
+                "img[src*='/data/menus/']"
+            )
+            total_menus = len(menu_thumbs)
+            menu_names = [f"Menu {i+1}" for i in range(total_menus)]
+
+        print(f"      📋 Found {total_menus} menu(s) to scrape")
+
+        for idx in range(total_menus):
             try:
+                # Re-find cards fresh each iteration to avoid stale references
+                current_cards = find_menu_cards()
+                if idx >= len(current_cards):
+                    print(f"      ⚠️  Card {idx} no longer found, skipping")
+                    continue
+
+                menu_name, card_element = current_cards[idx]
                 print(f"      📖 Opening: {menu_name}")
 
                 # Click the menu card to open popup
@@ -121,76 +186,84 @@ def scrape_menu_images(driver, url):
                 max_pages = 50
 
                 for page_num in range(max_pages):
-                    # Grab all large images currently visible in the popup
+                    # Grab menu images — only from /data/menus/ path (actual menu pages)
                     popup_imgs = driver.find_elements(
-                        By.CSS_SELECTOR, "img[src*='zmtcdn.com']"
+                        By.CSS_SELECTOR, "img[src*='/data/menus/']"
                     )
 
                     for img in popup_imgs:
                         src = img.get_attribute("src") or ""
                         if not src or src in seen_srcs:
                             continue
-                        if ("zmtcdn.com" in src and "logo" not in src
-                                and "icon" not in src and "/data/pictures" not in src
-                                and "reviews_photos" not in src
-                                and "res_card" not in src):
-                            natural_w = driver.execute_script(
-                                "return arguments[0].naturalWidth || arguments[0].offsetWidth || 0;", img
-                            )
-                            if natural_w > 300:
-                                seen_srcs.add(src)
-                                page_images.append(src)
-
-                    # Click right arrow to go to next menu page
-                    next_clicked = False
-                    try:
-                        # Find the right/next arrow in the popup
-                        right_arrows = driver.find_elements(
-                            By.CSS_SELECTOR,
-                            "[class*='next'], [class*='right-arrow'], "
-                            "[aria-label*='next' i], [aria-label*='Next']"
+                        # Only collect actual menu page images (large ones)
+                        natural_w = driver.execute_script(
+                            "return arguments[0].naturalWidth || 0;", img
                         )
+                        if natural_w > 300:
+                            clean_src = src.split("?")[0] if "?" in src else src
+                            seen_srcs.add(src)
+                            page_images.append(clean_src)
 
-                        if not right_arrows:
-                            # Look for clickable elements on the right side of the screen
-                            candidates = driver.find_elements(
-                                By.CSS_SELECTOR,
-                                "div[role='button'], button, span[role='button']"
-                            )
-                            for el in candidates:
-                                try:
-                                    loc = el.location
-                                    if loc['x'] > 900:  # Right side of 1920px window
-                                        # Check if it contains an SVG or arrow-like content
-                                        inner = el.get_attribute("innerHTML") or ""
-                                        if "svg" in inner.lower() or "arrow" in inner.lower() or ">" in el.text:
-                                            right_arrows.append(el)
-                                except:
-                                    pass
+                    # Try to navigate to next page using keyboard arrow
+                    try:
+                        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ARROW_RIGHT)
+                        time.sleep(2)
 
-                        if right_arrows:
-                            driver.execute_script("arguments[0].click();", right_arrows[0])
-                            time.sleep(1.5)
-                            next_clicked = True
-
-                            # Check if a new image appeared
-                            new_imgs = driver.find_elements(
-                                By.CSS_SELECTOR, "img[src*='zmtcdn.com']"
-                            )
-                            has_new = False
-                            for img in new_imgs:
-                                src = img.get_attribute("src") or ""
-                                if src and src not in seen_srcs and "zmtcdn.com" in src:
+                        # Check if a new menu image appeared
+                        new_imgs = driver.find_elements(
+                            By.CSS_SELECTOR, "img[src*='/data/menus/']"
+                        )
+                        has_new = False
+                        for img in new_imgs:
+                            src = img.get_attribute("src") or ""
+                            if src and src not in seen_srcs:
+                                natural_w = driver.execute_script(
+                                    "return arguments[0].naturalWidth || 0;", img
+                                )
+                                if natural_w > 300:
                                     has_new = True
                                     break
+
+                        if not has_new:
+                            # Try clicking right-side arrow buttons
+                            arrows = driver.find_elements(
+                                By.CSS_SELECTOR,
+                                "[class*='next'], [class*='right'], [aria-label*='next' i], [aria-label*='Next']"
+                            )
+                            if not arrows:
+                                candidates = driver.find_elements(
+                                    By.CSS_SELECTOR,
+                                    "div[role='button'], button, span[role='button'], div[tabindex]"
+                                )
+                                for el in candidates:
+                                    try:
+                                        loc = el.location
+                                        size = el.size
+                                        inner = el.get_attribute("innerHTML") or ""
+                                        if loc['x'] > 800 and size['height'] > 20 and "svg" in inner.lower():
+                                            arrows.append(el)
+                                    except:
+                                        pass
+
+                            if arrows:
+                                driver.execute_script("arguments[0].click();", arrows[0])
+                                time.sleep(2)
+                                new_imgs = driver.find_elements(
+                                    By.CSS_SELECTOR, "img[src*='/data/menus/']"
+                                )
+                                for img in new_imgs:
+                                    src = img.get_attribute("src") or ""
+                                    if src and src not in seen_srcs:
+                                        natural_w = driver.execute_script(
+                                            "return arguments[0].naturalWidth || 0;", img
+                                        )
+                                        if natural_w > 300:
+                                            has_new = True
+                                            break
+
                             if not has_new:
                                 break
-                        else:
-                            break
                     except:
-                        break
-
-                    if not next_clicked:
                         break
 
                 if page_images:
@@ -199,30 +272,16 @@ def scrape_menu_images(driver, url):
                 else:
                     print(f"        ✗ No pages collected")
 
-                # Close the popup — click X or press Escape
+                # Close the popup — press Escape
                 try:
-                    close_btn = driver.find_elements(
-                        By.CSS_SELECTOR,
-                        "[class*='close'], [aria-label*='close' i], [aria-label*='Close']"
-                    )
-                    if close_btn:
-                        driver.execute_script("arguments[0].click();", close_btn[0])
-                    else:
-                        from selenium.webdriver.common.keys import Keys
-                        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
-                    time.sleep(1.5)
+                    driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+                    time.sleep(2)
                 except:
-                    from selenium.webdriver.common.keys import Keys
-                    try:
-                        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
-                    except:
-                        pass
-                    time.sleep(1.5)
+                    pass
 
             except Exception as e:
-                print(f"      ⚠️  Error with {menu_name}: {e}")
+                print(f"      ⚠️  Error with menu {idx}: {e}")
                 try:
-                    from selenium.webdriver.common.keys import Keys
                     driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
                     time.sleep(1)
                 except:
@@ -236,13 +295,12 @@ def scrape_menu_images(driver, url):
 
 
 def scrape_restaurant_detail(driver, url, card_image="N/A"):
-    info_url = url + "/info" if not url.endswith("/info") else url
-    driver.get(info_url)
+    driver.get(url)
     time.sleep(3)
     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
     time.sleep(2)
 
-    data = {"url": url, "card_image": card_image}  # thumbnail from listing page
+    data = {"url": url, "thumbnail": card_image}  # thumbnail from listing page
     page_source = driver.page_source
 
     # Name
@@ -354,13 +412,6 @@ def scrape_restaurant_detail(driver, url, card_image="N/A"):
     except:
         data["top_dishes"] = []
 
-    # Menu images - click menu cards on info page, navigate popup pages
-    data["menu_images"] = scrape_menu_images(driver, url)
-
-    # Re-navigate to info page since popup interaction may have changed state
-    driver.get(info_url)
-    time.sleep(2)
-
     # Direction link (Google Maps)
     try:
         map_el = driver.find_element(By.CSS_SELECTOR, "a[href*='google.com/maps']")
@@ -380,6 +431,10 @@ def scrape_restaurant_detail(driver, url, card_image="N/A"):
     except:
         data["images"] = []
 
+    # Menu images - click menu cards on info page, navigate popup pages
+    # Done last since popup interactions may alter page state
+    data["menu_images"] = scrape_menu_images(driver, url)
+
     data["reviews_link"] = url + "/reviews"
     data["photos_link"] = url + "/photos"
 
@@ -387,95 +442,215 @@ def scrape_restaurant_detail(driver, url, card_image="N/A"):
 
 
 
-def append_to_json(filepath, record):
-    if os.path.exists(filepath):
-        with open(filepath, "r", encoding="utf-8") as f:
-            existing = json.load(f)
-    else:
-        existing = []
-    existing.append(record)
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(existing, f, indent=2, ensure_ascii=False)
+def get_restaurant_id(url):
+    """Extract restaurant ID from Zomato URL (last path segment)."""
+    try:
+        # e.g. https://www.zomato.com/mumbai/rasoi-dadar-east -> rasoi-dadar-east
+        path = url.rstrip("/").split("/")[-1]
+        return path
+    except:
+        return None
+
+
+def get_city_from_url(url):
+    """Extract city name from Zomato URL."""
+    try:
+        # e.g. https://www.zomato.com/mumbai/rasoi-dadar-east -> mumbai
+        parts = url.rstrip("/").split("/")
+        # Find the part after zomato.com
+        for i, part in enumerate(parts):
+            if "zomato.com" in part and i + 1 < len(parts):
+                return parts[i + 1].lower()
+    except:
+        pass
+    return "mumbai"
+
+
+import threading
+
+_save_lock = threading.Lock()
+
+
+def save_restaurant(data, city="mumbai"):
+    """Save individual restaurant JSON and update the combined restaurants.json. Thread-safe."""
+    base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", city)
+    restaurants_dir = os.path.join(base_dir, "restaurants")
+    os.makedirs(restaurants_dir, exist_ok=True)
+
+    restaurant_id = get_restaurant_id(data.get("url", ""))
+    if not restaurant_id:
+        return False
+
+    # Save individual restaurant file
+    individual_file = os.path.join(restaurants_dir, f"{restaurant_id}.json")
+    with open(individual_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+    # Update combined restaurants.json (thread-safe)
+    with _save_lock:
+        try:
+            combined_file = os.path.join(base_dir, "restaurants.json")
+            if os.path.exists(combined_file):
+                with open(combined_file, "r", encoding="utf-8") as f:
+                    all_restaurants = json.load(f)
+            else:
+                all_restaurants = []
+
+            # Replace if already exists, else append
+            updated = False
+            for i, r in enumerate(all_restaurants):
+                if get_restaurant_id(r.get("url", "")) == restaurant_id:
+                    all_restaurants[i] = data
+                    updated = True
+                    break
+            if not updated:
+                all_restaurants.append(data)
+
+            with open(combined_file, "w", encoding="utf-8") as f:
+                json.dump(all_restaurants, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"      ⚠️  Error updating restaurants.json: {e}")
+
+    return True
+
+
+def is_already_scraped(url, city="mumbai"):
+    """Check if a restaurant has already been scraped."""
+    restaurant_id = get_restaurant_id(url)
+    if not restaurant_id:
+        return False
+    base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", city)
+    individual_file = os.path.join(base_dir, "restaurants", f"{restaurant_id}.json")
+    return os.path.exists(individual_file)
+
+def scrape_restaurant_worker(args):
+    """Worker function for thread pool — each thread gets its own browser."""
+    url, card_image, city = args
+    driver = None
+    try:
+        driver = get_driver()
+        data = scrape_restaurant_detail(driver, url, card_image)
+        save_restaurant(data, city)
+        print(f"    ✓ {data.get('name', 'N/A')} — {url.split('/')[-1]}")
+        return data
+    except Exception as e:
+        print(f"    ✗ Error: {url.split('/')[-1]} — {e}")
+        return None
+    finally:
+        try:
+            if driver:
+                driver.quit()
+        except:
+            pass
+
 
 # ---- MAIN ----
 if __name__ == "__main__":
-    OUTPUT_FILE = os.getenv("OUTPUT_FILE")
+    import random
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    MAX_RESTAURANTS = int(os.getenv("MAX_RESTAURANTS", 50))
+    CITY = os.getenv("CITY", "mumbai")
+    DELAY_MIN = int(os.getenv("DELAY_MIN", 4))
+    DELAY_MAX = int(os.getenv("DELAY_MAX", 8))
+    SCROLL_DELAY_MIN = int(os.getenv("SCROLL_DELAY_MIN", 5))
+    SCROLL_DELAY_MAX = int(os.getenv("SCROLL_DELAY_MAX", 8))
+    WORKERS = int(os.getenv("WORKERS", 5))
+
+    # Use one main driver just for the listing page scrolling
     driver = get_driver()
 
-    print("🌐 Loading Zomato Mumbai restaurants page...")
-    driver.get(os.getenv("BASE_URL"))
-    time.sleep(5)
+    try:
+        print(f"🌐 Loading Zomato {CITY.title()} restaurants page...")
+        print(f"   Config: max={MAX_RESTAURANTS}, workers={WORKERS}")
+        driver.get(os.getenv("BASE_URL"))
+        time.sleep(random.uniform(SCROLL_DELAY_MIN, SCROLL_DELAY_MAX))
 
-    already_seen_links = set()
-    total_saved = 0
-    scroll_num = 0
-    consecutive_empty = 0
-
-    while True:
-        scroll_num += 1
-        print(f"\n{'='*60}")
-        print(f"📜 Scroll {scroll_num} (total saved: {total_saved})...")
-
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(2)
-
-        current_links = get_links_after_one_scroll(driver)
-        new_links_dict = {url: img for url, img in current_links.items() if url not in already_seen_links}
-        already_seen_links.update(new_links_dict.keys())
-
-        print(f"  🔗 {len(new_links_dict)} new restaurant links found")
-
-        if not new_links_dict:
-            consecutive_empty += 1
-            print(f"  ⚠️  No new links found ({consecutive_empty}/5)...")
-            if consecutive_empty >= 5:
-                print("  🏁 No more restaurants to scrape. Stopping.")
-                break
-            time.sleep(2)
-            continue
-
+        already_seen_links = set()
+        total_saved = 0
+        total_skipped = 0
+        scroll_num = 0
         consecutive_empty = 0
-        listing_url = driver.current_url
-        new_links_list = list(new_links_dict.items())
 
-        for i, (link, card_image) in enumerate(new_links_list, 1):
-            print(f"\n  [{i}/{len(new_links_list)}] Scraping: {link}")
+        while total_saved < MAX_RESTAURANTS:
+            scroll_num += 1
+            print(f"\n{'='*60}")
+            print(f"📜 Scroll {scroll_num} (saved: {total_saved}/{MAX_RESTAURANTS}, skipped: {total_skipped})...")
+
             try:
-                data = scrape_restaurant_detail(driver, link, card_image)
-                append_to_json(OUTPUT_FILE, data)
-                total_saved += 1
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(random.uniform(SCROLL_DELAY_MIN, SCROLL_DELAY_MAX))
 
-                print(f"    ✓ {data['name']}")
-                print(f"      Dining:     {data['dining_rating']}★ ({data['dining_rating_count']} ratings)")
-                print(f"      Delivery:   {data['delivery_rating']}★ ({data['delivery_rating_count']} ratings)")
-                print(f"      Cuisines:   {', '.join(data['cuisines'])}")
-                print(f"      Top Dishes: {', '.join(data['top_dishes'])}")
-                print(f"      Phone:      {', '.join(data['phone'])}")
-                print(f"      Cost:       {data['cost_for_two']}")
-                print(f"      Status:     {data['status']}")
-                print(f"      Images:     {len(data['images'])}")
-                menu_count = sum(len(v) for v in data['menu_images'].values())
-                print(f"      Menu Imgs:  {menu_count} images across {len(data['menu_images'])} menus")
-                print(f"      Direction:  {data['direction_link']}")
-                print(f"      💾 Saved to {OUTPUT_FILE} (Total: {total_saved})")
+                current_links = get_links_after_one_scroll(driver)
+                new_links_dict = {url: img for url, img in current_links.items() if url not in already_seen_links}
+                already_seen_links.update(new_links_dict.keys())
             except Exception as e:
-                print(f"    ✗ Error scraping {link}: {e}")
-            time.sleep(1)
-            break
+                print(f"  ⚠️  Error during scroll/link extraction: {e}")
+                time.sleep(5)
+                continue
 
-        print(f"\n  🔄 Returning to listing page...")
-        driver.get(listing_url)
-        time.sleep(3)
-        break
+            print(f"  🔗 {len(new_links_dict)} new restaurant links found")
 
-        print(f"  ⏩ Re-scrolling to position ({scroll_num} scrolls)...")
-        for _ in range(scroll_num):
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(1.5)
+            if not new_links_dict:
+                consecutive_empty += 1
+                print(f"  ⚠️  No new links found ({consecutive_empty}/5)...")
+                if consecutive_empty >= 5:
+                    print("  🏁 No more restaurants to scrape. Stopping.")
+                    break
+                time.sleep(random.uniform(3, 5))
+                continue
 
-    driver.quit()
+            consecutive_empty = 0
+
+            # Filter out already scraped
+            to_scrape = []
+            for link, card_image in new_links_dict.items():
+                if total_saved + len(to_scrape) >= MAX_RESTAURANTS:
+                    break
+                try:
+                    if is_already_scraped(link, CITY):
+                        total_skipped += 1
+                        print(f"  ⏭️  Already scraped: {link.split('/')[-1]}")
+                        continue
+                except:
+                    pass
+                to_scrape.append((link, card_image, CITY))
+
+            if not to_scrape:
+                continue
+
+            print(f"\n  🚀 Scraping {len(to_scrape)} restaurants with {WORKERS} workers...")
+
+            # Process in batches using thread pool
+            with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+                futures = {executor.submit(scrape_restaurant_worker, args): args for args in to_scrape}
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                        if result:
+                            with _save_lock:
+                                total_saved += 1
+                    except Exception as e:
+                        print(f"    ✗ Worker error: {e}")
+
+            print(f"\n  📊 Batch complete — saved: {total_saved}/{MAX_RESTAURANTS}")
+
+            if total_saved >= MAX_RESTAURANTS:
+                break
+
+            # Delay before next scroll
+            time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
+
+    except Exception as e:
+        print(f"\n❌ Fatal error: {e}")
+    finally:
+        try:
+            driver.quit()
+        except:
+            pass
 
     print(f"\n{'='*60}")
     print(f"✅ Scraping complete!")
     print(f"   Total restaurants saved: {total_saved}")
+    print(f"   Total skipped (already scraped): {total_skipped}")
+    print(f"   Data location: data/{CITY}/restaurants/")
