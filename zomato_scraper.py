@@ -51,9 +51,8 @@ def get_links_after_one_scroll(driver):
 
 
 def scrape_menu_images(driver, url):
-    """On the /info page, click each menu card (Food Menu, Bar Menu, etc.)
-    to open the popup viewer, then navigate through all pages using the
-    right arrow and collect each menu page image."""
+    """On the /info page, scroll to menu section, click each menu card
+    to open popup, navigate pages with arrow, collect images."""
     menu_images = {}  # { "Food Menu": [img1, img2, ...], "Bar Menu": [...] }
 
     try:
@@ -61,23 +60,13 @@ def scrape_menu_images(driver, url):
         info_url = url.rstrip("/") + "/info"
         if "/info" not in driver.current_url:
             driver.get(info_url)
-            time.sleep(3)
+            time.sleep(4)
 
-        # Scroll to make menu section visible
+        # Scroll down to make menu section visible
         driver.execute_script("window.scrollTo(0, 600);")
-        time.sleep(1)
+        time.sleep(2)
 
-        # Find menu card labels like "Food Menu", "Bar Menu"
-        # These are typically text elements near the menu thumbnail images
-        menu_labels = driver.find_elements(
-            By.XPATH,
-            "//*[contains(text(),'Menu') and contains(text(),'page')]/.."
-            " | //*[contains(text(),'Menu')][following-sibling::*[contains(text(),'page')] "
-            "or preceding-sibling::*[contains(text(),'page')]]/.."
-        )
-
-        # Simpler approach: find all elements that have "X pages" text
-        # and get their parent container which is the clickable card
+        # Find elements with "page" or "pages" text — these sit under the menu cards
         page_indicators = driver.find_elements(
             By.XPATH,
             "//*[contains(text(),' page')]"
@@ -89,12 +78,12 @@ def scrape_menu_images(driver, url):
                 text = indicator.text.strip().lower()
                 if "page" not in text:
                     continue
-                # Go up to find the clickable container and menu name
+                # The clickable card is typically a parent/grandparent of the "X pages" text
                 parent = indicator.find_element(By.XPATH, "./..")
                 grandparent = parent.find_element(By.XPATH, "./..")
                 container_text = grandparent.text.strip()
                 lines = [l.strip() for l in container_text.split("\n") if l.strip()]
-                # Menu name is typically the line that contains "Menu"
+                # Menu name is the line containing "Menu" but not "page"
                 menu_name = "Menu"
                 for line in lines:
                     if "menu" in line.lower() and "page" not in line.lower():
@@ -105,7 +94,7 @@ def scrape_menu_images(driver, url):
                 continue
 
         if not menu_cards_info:
-            # Fallback: look for img elements in menu section and their containers
+            # Fallback: find menu thumbnail images and use their parent as clickable
             menu_section_imgs = driver.find_elements(
                 By.XPATH,
                 "//img[contains(@src,'zmtcdn.com') and contains(@src,'menu')]"
@@ -125,25 +114,22 @@ def scrape_menu_images(driver, url):
 
                 # Click the menu card to open popup
                 driver.execute_script("arguments[0].click();", card_element)
-                time.sleep(2)
+                time.sleep(3)
 
                 page_images = []
                 seen_srcs = set()
-                max_pages = 50  # Safety limit
+                max_pages = 50
 
                 for page_num in range(max_pages):
-                    # Get the large menu image currently displayed in the popup
-                    # The popup overlay typically has a large image
+                    # Grab all large images currently visible in the popup
                     popup_imgs = driver.find_elements(
-                        By.CSS_SELECTOR,
-                        "img[src*='zmtcdn.com']"
+                        By.CSS_SELECTOR, "img[src*='zmtcdn.com']"
                     )
 
                     for img in popup_imgs:
                         src = img.get_attribute("src") or ""
                         if not src or src in seen_srcs:
                             continue
-                        # Filter for menu page images (large, not icons/logos)
                         if ("zmtcdn.com" in src and "logo" not in src
                                 and "icon" not in src and "/data/pictures" not in src
                                 and "reviews_photos" not in src
@@ -155,40 +141,30 @@ def scrape_menu_images(driver, url):
                                 seen_srcs.add(src)
                                 page_images.append(src)
 
-                    # Click the right arrow to go to next page
+                    # Click right arrow to go to next menu page
                     next_clicked = False
                     try:
-                        # The right arrow is typically on the right side of the popup
-                        # Look for SVG arrows, button elements, or clickable divs
+                        # Find the right/next arrow in the popup
                         right_arrows = driver.find_elements(
                             By.CSS_SELECTOR,
-                            "[class*='next'], [class*='right'], [aria-label*='next' i], "
-                            "[aria-label*='Next'], [class*='forward']"
+                            "[class*='next'], [class*='right-arrow'], "
+                            "[aria-label*='next' i], [aria-label*='Next']"
                         )
 
-                        # Also try finding by position - right side arrows
                         if not right_arrows:
-                            right_arrows = driver.find_elements(
-                                By.XPATH,
-                                "//div[contains(@style,'right') or contains(@class,'right')]"
-                                "[.//svg or .//path or contains(@class,'arrow')]"
-                            )
-
-                        # Try generic approach: find all large clickable areas that might be arrows
-                        if not right_arrows:
-                            # The arrows in Zomato popup are typically large div/span on sides
-                            all_arrows = driver.find_elements(
+                            # Look for clickable elements on the right side of the screen
+                            candidates = driver.find_elements(
                                 By.CSS_SELECTOR,
-                                "svg, [class*='arrow'], [class*='chevron'], "
-                                "[role='button']"
+                                "div[role='button'], button, span[role='button']"
                             )
-                            # Filter for ones on the right half of viewport
-                            for arrow in all_arrows:
+                            for el in candidates:
                                 try:
-                                    loc = arrow.location
-                                    size = arrow.size
-                                    if loc['x'] > 500:  # Right side of 1920px window
-                                        right_arrows.append(arrow)
+                                    loc = el.location
+                                    if loc['x'] > 900:  # Right side of 1920px window
+                                        # Check if it contains an SVG or arrow-like content
+                                        inner = el.get_attribute("innerHTML") or ""
+                                        if "svg" in inner.lower() or "arrow" in inner.lower() or ">" in el.text:
+                                            right_arrows.append(el)
                                 except:
                                     pass
 
@@ -197,20 +173,20 @@ def scrape_menu_images(driver, url):
                             time.sleep(1.5)
                             next_clicked = True
 
-                            # Verify we got a new image
-                            new_popup_imgs = driver.find_elements(
+                            # Check if a new image appeared
+                            new_imgs = driver.find_elements(
                                 By.CSS_SELECTOR, "img[src*='zmtcdn.com']"
                             )
                             has_new = False
-                            for img in new_popup_imgs:
+                            for img in new_imgs:
                                 src = img.get_attribute("src") or ""
                                 if src and src not in seen_srcs and "zmtcdn.com" in src:
                                     has_new = True
                                     break
                             if not has_new:
-                                break  # No more pages
+                                break
                         else:
-                            break  # No arrow found
+                            break
                     except:
                         break
 
@@ -220,31 +196,31 @@ def scrape_menu_images(driver, url):
                 if page_images:
                     menu_images[menu_name] = page_images
                     print(f"        ✓ {len(page_images)} page(s) collected")
+                else:
+                    print(f"        ✗ No pages collected")
 
-                # Close the popup - click X button or press Escape
+                # Close the popup — click X or press Escape
                 try:
                     close_btn = driver.find_elements(
                         By.CSS_SELECTOR,
-                        "[class*='close'], [aria-label*='close' i], "
-                        "[aria-label*='Close'], button[class*='dismiss']"
+                        "[class*='close'], [aria-label*='close' i], [aria-label*='Close']"
                     )
                     if close_btn:
                         driver.execute_script("arguments[0].click();", close_btn[0])
                     else:
                         from selenium.webdriver.common.keys import Keys
                         driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
-                    time.sleep(1)
+                    time.sleep(1.5)
                 except:
                     from selenium.webdriver.common.keys import Keys
                     try:
                         driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
                     except:
                         pass
-                    time.sleep(1)
+                    time.sleep(1.5)
 
             except Exception as e:
                 print(f"      ⚠️  Error with {menu_name}: {e}")
-                # Try to close any open popup
                 try:
                     from selenium.webdriver.common.keys import Keys
                     driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
